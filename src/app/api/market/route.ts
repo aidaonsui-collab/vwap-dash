@@ -22,7 +22,7 @@ async function getOHLC(coin: string = "bitcoin"): Promise<number[][] | null> {
   try {
     // CoinGecko simple price + ohlcv
     const res = await fetch(
-      `https://api.coingecko.com/api/v3/coins/${coin}/ohlc?vs_currencies=usd&days=7`,
+      `https://api.coingecko.com/api/v3/coins/${coin}/ohlc?vs_currency=usd&days=7`,
       { cache: 'no-store' }
     );
     const data = await res.json();
