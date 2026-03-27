@@ -38,14 +38,20 @@ async function getOHLC(coin: string = "bitcoin"): Promise<number[][] | null> {
 }
 
 // Get BTC price from CoinGecko
+// Get live BTC price from Hyperliquid (real-time, no delay)
 async function getBTCPrice(): Promise<number | null> {
   try {
-    const res = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true',
-      { cache: 'no-store' }
-    );
+    const res = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: "allMids" }),
+      cache: 'no-store'
+    });
     const data = await res.json();
-    return data?.bitcoin?.usd || null;
+    if (data?.BTC) {
+      return parseFloat(data.BTC);
+    }
+    return null;
   } catch {
     return null;
   }
