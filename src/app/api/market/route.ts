@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
 const HYPERLIQUID_API = 'https://api.hyperliquid.xyz/info';
+const BINANCE_API = 'https://api.binance.com/api/v3';
 
 interface MarketData {
   price: number;
@@ -17,20 +18,18 @@ interface MarketData {
   };
 }
 
-// Fetch BTC price from Hyperliquid
+// Get live BTC price from Hyperliquid
 async function getBTCPrice(): Promise<number | null> {
   try {
     const res = await fetch(HYPERLIQUID_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: "meta",
-        coin: "BTC"
-      })
+      body: JSON.stringify({ type: "allMids" }),
+      next: { revalidate: 10 }
     });
     const data = await res.json();
-    if (data?.uniTraded?.allMids?.BTC) {
-      return parseFloat(data.uniTraded.allMids.BTC);
+    if (data?.BTC) {
+      return parseFloat(data.BTC);
     }
     return null;
   } catch {
@@ -38,132 +37,121 @@ async function getBTCPrice(): Promise<number | null> {
   }
 }
 
-// Fetch candlestick data for RSI calculation
-async function getCandles(coin: string = "BTC", interval: string = "1h"): Promise<any[]> {
+// Get RSI from Binance klines (public API, no auth needed)
+async function getRSI(symbol: string = "BTCUSDT", interval: string = "1h"): Promise<number> {
   try {
-    const res = await fetch(HYPERLIQUID_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: "candleSnapshot",
-        coin: coin,
-        interval: interval
-      })
-    });
-    const data = await res.json();
-    return data?.data || [];
+    const res = await fetch(
+      `${BINANCE_API}/klines?symbol=${symbol}&interval=${interval}&limit=50`,
+      { next: { revalidate: 10 } }
+    );
+    const klines: number[][] = await res.json();
+    
+    if (!klines || klines.length < 15) return 50;
+    
+    let gains = 0;
+    let losses = 0;
+    
+    for (let i = 1; i < klines.length; i++) {
+      const change = parseFloat(String(klines[i][4])) - parseFloat(String(klines[i-1][4]));
+      if (change > 0) gains += change;
+      else losses += Math.abs(change);
+    }
+    
+    const avgGain = gains / klines.length;
+    const avgLoss = losses / klines.length;
+    
+    if (avgLoss === 0) return 100;
+    const rs = avgGain / avgLoss;
+    return 100 - (100 / (1 + rs));
   } catch {
-    return [];
+    return 50;
   }
 }
 
-// Calculate RSI from candle data
-function calculateRSI(candles: any[]): number {
-  if (candles.length < 15) return 50;
-  
-  let gains = 0;
-  let losses = 0;
-  
-  for (let i = 1; i < candles.length; i++) {
-    const change = candles[i].close - candles[i - 1].close;
-    if (change > 0) gains += change;
-    else losses += Math.abs(change);
+// Get VWAP from Binance
+async function getVWAP(symbol: string = "BTCUSDT", interval: string = "1h"): Promise<number> {
+  try {
+    const res = await fetch(
+      `${BINANCE_API}/klines?symbol=${symbol}&interval=${interval}&limit=100`,
+      { next: { revalidate: 10 } }
+    );
+    const klines: number[][] = await res.json();
+    
+    if (!klines || klines.length === 0) return 0;
+    
+    let totalVolume = 0;
+    let volumePriceSum = 0;
+    
+    for (const k of klines) {
+      const high = parseFloat(String(k[2]));
+      const low = parseFloat(String(k[3]));
+      const close = parseFloat(String(k[4]));
+      const volume = parseFloat(String(k[5]));
+      const typicalPrice = (high + low + close) / 3;
+      volumePriceSum += typicalPrice * volume;
+      totalVolume += volume;
+    }
+    
+    return totalVolume > 0 ? volumePriceSum / totalVolume : 0;
+  } catch {
+    return 0;
   }
-  
-  const avgGain = gains / candles.length;
-  const avgLoss = losses / candles.length;
-  
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
 }
 
-// Calculate VWAP from candles
-function calculateVWAP(candles: any[]): number {
-  if (candles.length === 0) return 0;
-  
-  let totalVolume = 0;
-  let volumePriceSum = 0;
-  
-  for (const candle of candles) {
-    const typicalPrice = (candle.high + candle.low + candle.close) / 3;
-    volumePriceSum += typicalPrice * candle.volume;
-    totalVolume += candle.volume;
+// Get 24h change from Binance
+async function get24hChange(symbol: string = "BTCUSDT"): Promise<number> {
+  try {
+    const res = await fetch(
+      `${BINANCE_API}/ticker/24hr?symbol=${symbol}`,
+      { next: { revalidate: 10 } }
+    );
+    const data = await res.json();
+    return parseFloat(data.priceChangePercent);
+  } catch {
+    return 0;
   }
-  
-  return totalVolume > 0 ? volumePriceSum / totalVolume : 0;
 }
 
-function getDemoData(): MarketData {
-  const basePrice = 95000 + Math.random() * 10000;
-  const vwap = basePrice * (0.98 + Math.random() * 0.04);
-  const rsi = 30 + Math.random() * 40;
-  
-  const priceAboveVWAP = basePrice > vwap;
+function calculateSignal(price: number, vwap: number, rsi: number): 'LONG' | 'SHORT' | 'NONE' | 'WATCH' {
+  const priceAboveVWAP = price > vwap;
   const rsiOversold = rsi < 35;
   const rsiOverbought = rsi > 65;
+  const nearVWAP = vwap ? Math.abs(price - vwap) / vwap < 0.003 : false;
   
-  let signal: 'LONG' | 'SHORT' | 'NONE' | 'WATCH' = 'NONE';
-  if (priceAboveVWAP && rsiOversold) {
-    signal = 'LONG';
-  } else if (!priceAboveVWAP && rsiOverbought) {
-    signal = 'SHORT';
-  } else if (Math.abs(basePrice - vwap) / vwap < 0.005) {
-    signal = 'WATCH';
-  }
-
-  return {
-    price: basePrice,
-    vwap: vwap,
-    rsi: rsi,
-    signal: signal,
-    change24h: -2 + Math.random() * 4,
-    volume24h: 15000000000 + Math.random() * 5000000000,
-    distanceToVWAP: ((basePrice - vwap) / vwap) * 100,
-    conditions: {
-      rsiOk: rsi < 35,
-      priceOk: basePrice > vwap,
-      trendOk: Math.random() > 0.5
-    }
-  };
+  if (priceAboveVWAP && rsiOversold) return 'LONG';
+  if (!priceAboveVWAP && rsiOverbought) return 'SHORT';
+  if (nearVWAP) return 'WATCH';
+  return 'NONE';
 }
 
 export async function GET() {
   try {
-    // Get live price
-    const price = await getBTCPrice();
-    const candles = await getCandles("BTC", "1h");
-    const vwap = calculateVWAP(candles);
-    const rsi = calculateRSI(candles);
+    // Fetch all data in parallel
+    const [price, rsi, vwap, change24h] = await Promise.all([
+      getBTCPrice(),
+      getRSI("BTCUSDT", "1h"),
+      getVWAP("BTCUSDT", "1h"),
+      get24hChange("BTCUSDT")
+    ]);
     
     if (!price) {
-      return NextResponse.json(getDemoData());
+      throw new Error('No price data');
     }
     
-    const priceAboveVWAP = price > vwap;
-    const rsiOversold = rsi < 35;
-    const rsiOverbought = rsi > 65;
+    const signal = calculateSignal(price, vwap, rsi);
+    const distanceToVWAP = vwap ? ((price - vwap) / vwap) * 100 : 0;
     
-    let signal: 'LONG' | 'SHORT' | 'NONE' | 'WATCH' = 'NONE';
-    if (priceAboveVWAP && rsiOversold) {
-      signal = 'LONG';
-    } else if (!priceAboveVWAP && rsiOverbought) {
-      signal = 'SHORT';
-    } else if (Math.abs(price - vwap) / (vwap || 1) < 0.005) {
-      signal = 'WATCH';
-    }
-
     const data: MarketData = {
-      price: price,
+      price,
       vwap: vwap || price * 0.999,
-      rsi: rsi,
-      signal: signal,
-      change24h: -2 + Math.random() * 4, // Would need 24h candle for real data
-      volume24h: 15000000000 + Math.random() * 5000000000,
-      distanceToVWAP: vwap ? ((price - vwap) / vwap) * 100 : 0,
+      rsi,
+      signal,
+      change24h,
+      volume24h: 0,
+      distanceToVWAP,
       conditions: {
         rsiOk: rsi < 35,
-        priceOk: priceAboveVWAP,
+        priceOk: price > vwap,
         trendOk: true
       }
     };
@@ -171,6 +159,16 @@ export async function GET() {
     return NextResponse.json(data);
   } catch (e) {
     console.error('Market data error:', e);
-    return NextResponse.json(getDemoData());
+    // Return demo data as fallback
+    return NextResponse.json({
+      price: 95000 + Math.random() * 10000,
+      vwap: 94500 + Math.random() * 1000,
+      rsi: 30 + Math.random() * 40,
+      signal: 'NONE',
+      change24h: 0,
+      volume24h: 0,
+      distanceToVWAP: 0,
+      conditions: { rsiOk: false, priceOk: false, trendOk: false }
+    });
   }
 }
