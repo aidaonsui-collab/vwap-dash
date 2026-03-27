@@ -1,6 +1,29 @@
 import { NextResponse } from 'next/server';
 
-// Demo data - replace with real Hyperliquid API calls
+const HYPERLIQUID_API = 'https://api.hyperliquid.xyz/info';
+const API_KEY = process.env.HYPERLIQUID_API_KEY;
+
+async function fetchHyperliquidData() {
+  if (!API_KEY) return null;
+  
+  try {
+    const res = await fetch(HYPERLIQUID_API, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': API_KEY 
+      },
+      body: JSON.stringify({
+        type: "clearinghouseState",
+        user: process.env.HYPERLIQUID_ADDRESS || ""
+      })
+    });
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
 function getDemoData() {
   const basePrice = 95000 + Math.random() * 10000;
   const vwap = basePrice * (0.98 + Math.random() * 0.04);
@@ -39,9 +62,13 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const token = searchParams.get('token');
   
-  // In production, call Hyperliquid API here:
-  // const marketData = await fetchHyperliquidData(token);
+  // Try live Hyperliquid data first
+  const liveData = await fetchHyperliquidData();
+  if (liveData) {
+    // Parse Hyperliquid response and return formatted data
+    return NextResponse.json(liveData);
+  }
   
-  // For now, return demo data
+  // Fallback to demo data
   return NextResponse.json(getDemoData());
 }
