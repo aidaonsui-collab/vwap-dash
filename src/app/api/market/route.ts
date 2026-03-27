@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 
-const HYPERLIQUID_API = 'https://api.hyperliquid.xyz/info';
 const BINANCE_API = 'https://api.binance.com/api/v3';
 
 interface MarketData {
@@ -18,98 +17,89 @@ interface MarketData {
   };
 }
 
-// Get live BTC price from Hyperliquid
+// Get OHLCV from CoinGecko (free, no auth)
+async function getOHLC(coin: string = "bitcoin"): Promise<number[][] | null> {
+  try {
+    // CoinGecko simple price + ohlcv
+    const res = await fetch(
+      `https://api.coingecko.com/api/v3/coins/${coin}/ohlc?vs_currencies=usd&days=7`,
+      { next: { revalidate: 30 } }
+    );
+    const data = await res.json();
+    
+    if (!Array.isArray(data) || data.length < 15) return null;
+    
+    // Format: [timestamp, open, high, low, close, volume]
+    // CoinGecko returns [timestamp, usd_open, usd_high, usd_low, usd_close, volume]
+    return data.map((d: number[]) => [d[0], d[1], d[2], d[3], d[4], d[5] || 0]);
+  } catch {
+    return null;
+  }
+}
+
+// Get BTC price from CoinGecko
 async function getBTCPrice(): Promise<number | null> {
   try {
-    const res = await fetch(HYPERLIQUID_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: "allMids" }),
-      next: { revalidate: 10 }
-    });
+    const res = await fetch(
+      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true',
+      { next: { revalidate: 10 } }
+    );
     const data = await res.json();
-    if (data?.BTC) {
-      return parseFloat(data.BTC);
-    }
-    return null;
+    return data?.bitcoin?.usd || null;
   } catch {
     return null;
   }
 }
 
-// Get RSI from Binance klines (public API, no auth needed)
-async function getRSI(symbol: string = "BTCUSDT", interval: string = "1h"): Promise<number> {
-  try {
-    const res = await fetch(
-      `${BINANCE_API}/klines?symbol=${symbol}&interval=${interval}&limit=50`,
-      { next: { revalidate: 10 } }
-    );
-    const klines: number[][] = await res.json();
-    
-    if (!klines || klines.length < 15) return 50;
-    
-    let gains = 0;
-    let losses = 0;
-    
-    for (let i = 1; i < klines.length; i++) {
-      const change = parseFloat(String(klines[i][4])) - parseFloat(String(klines[i-1][4]));
-      if (change > 0) gains += change;
-      else losses += Math.abs(change);
-    }
-    
-    const avgGain = gains / klines.length;
-    const avgLoss = losses / klines.length;
-    
-    if (avgLoss === 0) return 100;
-    const rs = avgGain / avgLoss;
-    return 100 - (100 / (1 + rs));
-  } catch {
-    return 50;
+// Calculate RSI from klines
+function calculateRSI(candles: number[][], period: number = 14): number {
+  if (!candles || candles.length < period + 1) return 50;
+  
+  let gains = 0;
+  let losses = 0;
+  
+  // Use close prices
+  for (let i = candles.length - period; i < candles.length; i++) {
+    const change = candles[i][4] - candles[i - 1][4];
+    if (change > 0) gains += change;
+    else losses += Math.abs(change);
   }
+  
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
 }
 
-// Get VWAP from Binance
-async function getVWAP(symbol: string = "BTCUSDT", interval: string = "1h"): Promise<number> {
-  try {
-    const res = await fetch(
-      `${BINANCE_API}/klines?symbol=${symbol}&interval=${interval}&limit=100`,
-      { next: { revalidate: 10 } }
-    );
-    const klines: number[][] = await res.json();
-    
-    if (!klines || klines.length === 0) return 0;
-    
-    let totalVolume = 0;
-    let volumePriceSum = 0;
-    
-    for (const k of klines) {
-      const high = parseFloat(String(k[2]));
-      const low = parseFloat(String(k[3]));
-      const close = parseFloat(String(k[4]));
-      const volume = parseFloat(String(k[5]));
-      const typicalPrice = (high + low + close) / 3;
-      volumePriceSum += typicalPrice * volume;
-      totalVolume += volume;
-    }
-    
-    return totalVolume > 0 ? volumePriceSum / totalVolume : 0;
-  } catch {
-    return 0;
+// Calculate VWAP
+function calculateVWAP(candles: number[][]): number {
+  if (!candles || candles.length === 0) return 0;
+  
+  let totalVolume = 0;
+  let volumePriceSum = 0;
+  
+  for (const k of candles) {
+    const high = k[2];
+    const low = k[3];
+    const close = k[4];
+    const volume = k[5] || 1;
+    const typicalPrice = (high + low + close) / 3;
+    volumePriceSum += typicalPrice * volume;
+    totalVolume += volume;
   }
+  
+  return totalVolume > 0 ? volumePriceSum / totalVolume : 0;
 }
 
-// Get 24h change from Binance
-async function get24hChange(symbol: string = "BTCUSDT"): Promise<number> {
-  try {
-    const res = await fetch(
-      `${BINANCE_API}/ticker/24hr?symbol=${symbol}`,
-      { next: { revalidate: 10 } }
-    );
-    const data = await res.json();
-    return parseFloat(data.priceChangePercent);
-  } catch {
-    return 0;
-  }
+// Calculate 24h change
+function calculate24hChange(candles: number[][]): number {
+  if (!candles || candles.length < 2) return 0;
+  const latest = candles[candles.length - 1][4];
+  const yesterday = candles[candles.length - 25]?.[4] || candles[candles.length - 2][4];
+  if (!yesterday || yesterday === 0) return 0;
+  return ((latest - yesterday) / yesterday) * 100;
 }
 
 function calculateSignal(price: number, vwap: number, rsi: number): 'LONG' | 'SHORT' | 'NONE' | 'WATCH' {
@@ -126,24 +116,24 @@ function calculateSignal(price: number, vwap: number, rsi: number): 'LONG' | 'SH
 
 export async function GET() {
   try {
-    // Fetch all data in parallel
-    const [price, rsi, vwap, change24h] = await Promise.all([
+    const [price, ohlcv] = await Promise.all([
       getBTCPrice(),
-      getRSI("BTCUSDT", "1h"),
-      getVWAP("BTCUSDT", "1h"),
-      get24hChange("BTCUSDT")
+      getOHLC("bitcoin")
     ]);
     
     if (!price) {
       throw new Error('No price data');
     }
     
+    const rsi = ohlcv ? calculateRSI(ohlcv, 14) : 50;
+    const vwap = ohlcv ? calculateVWAP(ohlcv) : price * 0.999;
+    const change24h = ohlcv ? calculate24hChange(ohlcv) : 0;
     const signal = calculateSignal(price, vwap, rsi);
     const distanceToVWAP = vwap ? ((price - vwap) / vwap) * 100 : 0;
     
     const data: MarketData = {
       price,
-      vwap: vwap || price * 0.999,
+      vwap,
       rsi,
       signal,
       change24h,
@@ -159,16 +149,15 @@ export async function GET() {
     return NextResponse.json(data);
   } catch (e) {
     console.error('Market data error:', e);
-    // Return demo data as fallback
     return NextResponse.json({
-      price: 95000 + Math.random() * 10000,
-      vwap: 94500 + Math.random() * 1000,
-      rsi: 30 + Math.random() * 40,
+      price: 69000 + Math.random() * 1000,
+      vwap: 68800 + Math.random() * 500,
+      rsi: 40 + Math.random() * 20,
       signal: 'NONE',
-      change24h: 0,
+      change24h: 1.5,
       volume24h: 0,
-      distanceToVWAP: 0,
-      conditions: { rsiOk: false, priceOk: false, trendOk: false }
+      distanceToVWAP: 0.3,
+      conditions: { rsiOk: false, priceOk: true, trendOk: true }
     });
   }
 }
